@@ -84,39 +84,9 @@ def webhook():
     # WhatsApp usa POST para enviar los mensajes entrantes
     if request.method == 'POST':
         # Por ahora solo respondemos que recibimos el mensaje para que Render y WhatsApp estén felices
-        # Más adelante conectaremos la función "procesar_gasto_whatsapp" aquí dentro
         data = request.json
         return jsonify({"status": "success", "message": "Mensaje recibido"}), 200
 
 if __name__ == "__main__":
     # Gunicorn se encargará de ejecutar esto en Render
     app.run(host='0.0.0.0', port=5000)
-    try:
-        respuesta = modelo.generate_content(contenido)
-        return respuesta.text
-    except Exception as e:
-         return f'{{"error": "Fallo en la generación de la API: {str(e)}"}}'
-
-# ==========================================
-# PRUEBAS DE EJECUCIÓN DEL CÓDIGO
-# ==========================================
-if __name__ == "__main__":
-    
-    # Prueba 1: Gasto en texto simple
-    print("--- PRUEBA 1: TEXTO ---")
-    json_resultado_texto = procesar_gasto_whatsapp(
-        usuario="Santiago",
-        mensaje_texto="Me acabo de comprar el menú de hoy por 45 soles. Lo pasé por Yape."
-    )
-    print(json_resultado_texto)
-
-    # Prueba 2: Gasto con imagen (Simulado)
-    # Para probar esto, descomenta las líneas inferiores y asegúrate de tener una imagen real
-    # print("\n--- PRUEBA 2: IMAGEN ---")
-    # json_resultado_imagen = procesar_gasto_whatsapp(
-    #     usuario="Yoly",
-    #     mensaje_texto="Aquí está el recibo de las compras para la casa en el súper.",
-    #     ruta_imagen="./boleta_supermercado.jpg"
-    # )
-    # print(json_resultado_imagen)
-
