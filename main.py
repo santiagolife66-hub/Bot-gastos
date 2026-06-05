@@ -79,6 +79,28 @@ def home():
     return "¡El bot está activo y conectado a WhatsApp!"
 
 @app.route('/webhook', methods=['GET', 'POST'])
+# ... (dentro de @app.route('/webhook', methods=['GET', 'POST']))
+
+# Si envías texto
+if mensaje['type'] == 'text':
+    texto_recibido = mensaje['text']['body']
+    respuesta_json = procesar_texto_gemini(texto_recibido)
+    
+    # [NUEVO]: Enviar datos a Google Sheets si la URL está configurada
+    sheets_url = os.environ.get("SHEETS_URL")
+    if sheets_url:
+        try:
+            import json
+            datos_limpios = json.loads(respuesta_json)
+            # Enviamos el JSON directamente a tu Google Sheets
+            requests.post(sheets_url, json=datos_limpios)
+        except Exception as sheet_err:
+            print(f"Error al guardar en Sheets: {sheet_err}")
+            
+    # Enviar confirmación por WhatsApp
+    enviar_mensaje_whatsapp(numero_remitente, respuesta_json)
+
+
 def webhook():
     # Verificación inicial de Meta
     if request.method == 'GET':
