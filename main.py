@@ -1,27 +1,30 @@
 import os
+import requests
 import google.generativeai as genai
 from flask import Flask, request, jsonify
 from datetime import datetime
 
-# 1. Inicializar la aplicación web Flask
 app = Flask(__name__)
 
-# 2. Configurar la clave API usando las variables de entorno de Render
+# --- 1. CONFIGURACIÓN DE CLAVES API ---
 API_KEY = os.environ.get("GEMINI_API_KEY")
 if API_KEY:
     genai.configure(api_key=API_KEY)
 
-# 3. Instrucciones del Sistema
+# Estas dos variables las sacaremos de Meta en el siguiente paso
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
+PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
+
+# --- 2. INSTRUCCIONES PARA GEMINI ---
 INSTRUCCIONES_SISTEMA = """
-Eres un asistente experto en finanzas personales y gestión de gastos del hogar, diseñado específicamente para Santiago y Yoly. Tu objetivo es procesar mensajes de texto o imágenes de comprobantes (boletas, facturas, recibos, capturas de pantalla) que ellos te envíen por WhatsApp, extraer la información financiera relevante y estructurarla estrictamente en formato JSON.
+Eres un asistente experto en finanzas personales y gestión de gastos del hogar, diseñado específicamente para Santiago y Yoly. Tu objetivo es procesar mensajes de texto de comprobantes que ellos te envíen por WhatsApp, extraer la información financiera relevante y estructurarla estrictamente en formato JSON.
 
 CRITERIOS DE PROCESAMIENTO:
-1. Si recibes un texto, analiza el gasto descrito.
-2. Si recibes una imagen, realiza un reconocimiento óptico de caracteres (OCR) preciso.
-3. Categoriza el gasto en: Alimentación, Salud, Transporte, Servicios Públicos, Entretenimiento, Compras Hogar, Educación, Otros.
-4. Extrae la fecha (DD/MM/AAAA) y hora (HH:MM). Si no se indica, usa la fecha y hora proporcionada en el contexto del mensaje.
-5. Identifica el método de pago (Efectivo, Tarjeta de Crédito, Tarjeta de Débito, Yape, Plin). Si no se menciona ni se ve, colócalo como "Por clasificar".
-6. Determina el monto total como un número decimal.
+1. Analiza el gasto descrito en el texto.
+2. Categoriza el gasto en: Alimentación, Salud, Transporte, Servicios Públicos, Entretenimiento, Compras Hogar, Educación, Otros.
+3. Extrae la fecha (DD/MM/AAAA) y hora (HH:MM). Si no se indica, usa la fecha y hora proporcionada en el contexto del mensaje.
+4. Identifica el método de pago (Efectivo, Tarjeta de Crédito, Tarjeta de Débito, Yape, Plin). Si no se menciona, colócalo como "Por clasificar".
+5. Determina el monto total como un número decimal.
 
 Estructura del JSON:
 {
@@ -36,57 +39,81 @@ Estructura del JSON:
 }
 """
 
-def procesar_gasto_whatsapp(usuario: str, mensaje_texto: str, ruta_imagen: str = None) -> str:
+def procesar_texto_gemini(mensaje_texto: str) -> str:
     modelo = genai.GenerativeModel(
         model_name="gemini-1.5-flash",
         system_instruction=INSTRUCCIONES_SISTEMA,
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json"
-        )
+        generation_config=genai.GenerationConfig(response_mime_type="application/json")
     )
-
     ahora = datetime.now()
     contexto_temporal = f"Contexto de envío - Fecha: {ahora.strftime('%d/%m/%Y')} | Hora: {ahora.strftime('%H:%M')}."
-
-    contenido = [f"Usuario: {usuario}\n{contexto_temporal}\nMensaje del usuario: {mensaje_texto}"]
-
-    # (Lógica de imagen comentada temporalmente hasta conectar con WhatsApp)
+    contenido = [f"{contexto_temporal}\nMensaje del usuario: {mensaje_texto}"]
     
     try:
         respuesta = modelo.generate_content(contenido)
         return respuesta.text
     except Exception as e:
-         return f'{{"error": "Fallo en la generación de la API: {str(e)}"}}'
+        return f'{{"error": "Fallo en Gemini: {str(e)}"}}'
 
-# --- RUTAS DEL SERVIDOR WEB ---
+def enviar_mensaje_whatsapp(numero_destino: str, texto_respuesta: str):
+    """Envía la respuesta de vuelta al usuario por WhatsApp"""
+    url = f"https://graph.facebook.com/v17.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "messaging_product": "whatsapp",
+        "to": numero_destino,
+        "type": "text",
+        "text": {"body": texto_respuesta}
+    }
+    requests.post(url, headers=headers, json=data)
 
-# Ruta de prueba para saber si el servidor está vivo
+# --- 3. RUTAS DEL SERVIDOR WEB ---
 @app.route('/', methods=['GET'])
 def home():
-    return "¡El bot de gastos está activo y funcionando correctamente!"
+    return "¡El bot está activo y conectado a WhatsApp!"
 
-# Ruta Webhook donde WhatsApp enviará los mensajes
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
-    # WhatsApp usa GET para verificar la conexión la primera vez
+    # Verificación inicial de Meta
     if request.method == 'GET':
         mode = request.args.get("hub.mode")
         token = request.args.get("hub.verify_token")
         challenge = request.args.get("hub.challenge")
-        
-        # Este token ("mi_token_secreto") lo usaremos luego en Meta for Developers
-        if mode and token:
-            if mode == "subscribe" and token == "mi_token_secreto":
-                return challenge, 200
-            else:
-                return "Token inválido", 403
+        if mode == "subscribe" and token == "mi_token_secreto":
+            return challenge, 200
+        return "Token inválido", 403
                 
-    # WhatsApp usa POST para enviar los mensajes entrantes
+    # Recepción de mensajes de WhatsApp
     if request.method == 'POST':
-        # Por ahora solo respondemos que recibimos el mensaje para que Render y WhatsApp estén felices
         data = request.json
-        return jsonify({"status": "success", "message": "Mensaje recibido"}), 200
+        try:
+            if 'object' in data and data['object'] == 'whatsapp_business_account':
+                entry = data['entry'][0]
+                changes = entry['changes'][0]
+                value = changes['value']
+                
+                # Verificar si es un mensaje (y no un check azul de lectura)
+                if 'messages' in value:
+                    mensaje = value['messages'][0]
+                    numero_remitente = mensaje['from']
+                    
+                    # Si envías texto
+                    if mensaje['type'] == 'text':
+                        texto_recibido = mensaje['text']['body']
+                        respuesta_json = procesar_texto_gemini(texto_recibido)
+                        enviar_mensaje_whatsapp(numero_remitente, respuesta_json)
+                        
+                    # Si envías una imagen (Dejamos esto preparado para el futuro)
+                    elif mensaje['type'] == 'image':
+                        enviar_mensaje_whatsapp(numero_remitente, "Recibí la foto. La función de imágenes requiere unos permisos más. ¡Por ahora probemos enviando el gasto en texto!")
+                        
+        except Exception as e:
+            print(f"Error procesando mensaje: {e}")
+            
+        return jsonify({"status": "success"}), 200
 
 if __name__ == "__main__":
-    # Gunicorn se encargará de ejecutar esto en Render
     app.run(host='0.0.0.0', port=5000)
