@@ -68,7 +68,10 @@ def enviar_mensaje_whatsapp(numero_destino: str, texto_respuesta: str):
         "type": "text",
         "text": {"body": texto_respuesta}
     }
-    requests.post(url, headers=headers, json=data)
+    respuesta = requests.post(url, headers=headers, json=data)
+    # Esto imprimirá la respuesta exacta de Meta en los logs de Render
+    print(f"Respuesta de Meta: {respuesta.json()}") 
+
 
 # --- 3. RUTAS DEL SERVIDOR WEB ---
 @app.route('/', methods=['GET'])
