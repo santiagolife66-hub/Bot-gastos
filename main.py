@@ -9,21 +9,18 @@ import json
 app = Flask(__name__)
 
 # --- 1. CONFIGURACIÓN DE CLIENTES Y TOKENS ---
-# Inicializa el cliente de Gemini (detecta automáticamente GEMINI_API_KEY)
 client = genai.Client()
-
-# Token de Telegram configurado en Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 # --- 2. INSTRUCCIONES PARA GEMINI ---
 INSTRUCCIONES_SISTEMA = """
-Eres un asistente experto en finanzas personales y gestión de gastos del hogar, diseñado específicamente para Santiago y Yoly. Tu objetivo es procesar mensajes de texto de comprobantes que ellos te envíen por WhatsApp o Telegram, extraer la información financiera relevante y estructurarla estrictamente en formato JSON.
+Eres un asistente experto en finanzas personales y gestión de gastos del hogar, diseñado específicamente para Santiago y Yoly. Tu objetivo es procesar mensajes de texto o imágenes de comprobantes (vouchers, boletas, capturas de Yape/Plin) que ellos te envíen, extraer la información financiera relevante y estructurarla estrictamente en formato JSON.
 
 CRITERIOS DE PROCESAMIENTO:
-1. Analiza el gasto descrito en el texto.
+1. Analiza el gasto descrito en el texto o visible en la imagen del comprobante.
 2. Categoriza el gasto en: Alimentación, Salud, Transporte, Servicios Públicos, Entretenimiento, Compras Hogar, Educación, Otros.
-3. Extrae la fecha (DD/MM/AAAA) y hora (HH:MM). Si no se indica, usa la fecha y hora proporcionada en el contexto del mensaje.
-4. Identifica el método de pago (Efectivo, Tarjeta de Crédito, Tarjeta de Débito, Yape, Plin). Si no se menciona, colócalo como "Por clasificar".
+3. Extrae la fecha (DD/MM/AAAA) y hora (HH:MM). Si no se indica o no es visible en la imagen, usa la fecha y hora proporcionada en el contexto del mensaje.
+4. Identifica el método de pago (Efectivo, Tarjeta de Crédito, Tarjeta de Débito, Yape, Plin). Si no se menciona ni se ve, colócalo como "Por clasificar".
 5. Determina el monto total como un número decimal.
 
 Estructura del JSON:
@@ -39,12 +36,21 @@ Estructura del JSON:
 }
 """
 
-def procesar_texto_gemini(mensaje_texto: str) -> str:
+def procesar_con_gemini(contenido_datos, es_imagen=False) -> str:
     ahora = datetime.now()
     contexto_temporal = f"Contexto de envío - Fecha: {ahora.strftime('%d/%m/%Y')} | Hora: {ahora.strftime('%H:%M')}."
-    contenido = f"{contexto_temporal}\nMensaje del usuario: {mensaje_texto}"
     
     try:
+        if es_imagen:
+            # Si es imagen, pasamos los bytes de la foto junto con el texto de contexto
+            contenido = [
+                types.Part.from_bytes(data=contenido_datos, mime_type="image/jpeg"),
+                f"{contexto_temporal}\nAnaliza este comprobante visual y extrae los datos del gasto."
+            ]
+        else:
+            # Si es texto normal
+            contenido = f"{contexto_temporal}\nMensaje del usuario: {contenido_datos}"
+            
         respuesta = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=contenido,
@@ -58,54 +64,74 @@ def procesar_texto_gemini(mensaje_texto: str) -> str:
         return f'{{"error": "Fallo en Gemini: {str(e)}"}}'
 
 def enviar_mensaje_telegram(chat_id: int, texto_respuesta: str):
-    """Envía la respuesta de vuelta al chat de Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {
-        "chat_id": chat_id,
-        "text": texto_respuesta
-    }
+    data = {"chat_id": chat_id, "text": texto_respuesta}
     try:
-        respuesta = requests.post(url, json=data)
-        print(f"Respuesta de Telegram: {respuesta.json()}")
+        requests.post(url, json=data)
     except Exception as e:
-        print(f"Error al enviar mensaje a Telegram: {e}")
+        print(f"Error al enviar a Telegram: {e}")
+
+def obtener_bytes_imagen_telegram(file_id: str) -> bytes:
+    """Descarga la foto desde los servidores de Telegram y devuelve sus bytes"""
+    url_info = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+    res_info = requests.get(url_info).json()
+    
+    if res_info.get("ok"):
+        file_path = res_info["result"]["file_path"]
+        url_descarga = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+        res_foto = requests.get(url_descarga)
+        return res_foto.content
+    return b""
 
 
 # --- 3. RUTAS DEL SERVIDOR WEB ---
 @app.route('/', methods=['GET'])
 def home():
-    return "¡El Bot de Gastos de Telegram está activo!"
+    return "¡El Bot de Gastos de Telegram está activo y soporta imágenes!"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Ruta que recibe las alertas de nuevos mensajes desde Telegram"""
     data = request.json
     
     try:
-        # Estructura nativa de un mensaje de texto en Telegram
-        if 'message' in data and 'text' in data['message']:
+        if 'message' in data:
             chat_id = data['message']['chat']['id']
-            texto_recibido = data['message']['text']
+            texto_recibido = data['message'].get('text')
             
-            # Evitamos procesar comandos de inicio del bot
-            if texto_recibido.startswith('/'):
-                enviar_mensaje_telegram(chat_id, "¡Hola! Envíame cualquier gasto (Ej: 'Menú 15 soles yape') y lo registraré automáticamente.")
-                return jsonify({"status": "success"}), 200
+            # CASO 1: Es un mensaje de texto normal u orden de inicio
+            if texto_recibido:
+                if texto_recibido.startswith('/'):
+                    enviar_mensaje_telegram(chat_id, "¡Hola! Envíame un texto (Ej: 'Cena 45 soles yape') o la FOTO de un comprobante y lo registraré en el acto.")
+                    return jsonify({"status": "success"}), 200
                 
-            # 1. Pasar el texto por Gemini para que lo estructure
-            respuesta_json = procesar_texto_gemini(texto_recibido)
-            
-            # 2. Enviar los datos limpios a Google Sheets
+                respuesta_json = procesar_con_gemini(texto_recibido, es_imagen=False)
+                
+            # CASO 2: El usuario envió una IMAGEN/FOTO
+            elif 'photo' in data['message']:
+                enviar_mensaje_telegram(chat_id, "📷 Leyendo la imagen del comprobante... dame un momento.")
+                
+                # Telegram envía varias resoluciones, la última [-1] es la de mejor calidad
+                file_id = data['message']['photo'][-1]['file_id']
+                bytes_foto = obtener_bytes_imagen_telegram(file_id)
+                
+                if bytes_foto:
+                    respuesta_json = procesar_con_gemini(bytes_foto, es_imagen=True)
+                else:
+                    enviar_mensaje_telegram(chat_id, "❌ No pude descargar la imagen de Telegram.")
+                    return jsonify({"status": "success"}), 200
+            else:
+                return jsonify({"status": "success"}), 200
+
+            # GUARDAR LOS DATOS EN GOOGLE SHEETS
             sheets_url = os.environ.get("SHEETS_URL")
-            if sheets_url:
+            if sheets_url and "error" not in respuesta_json:
                 try:
                     datos_limpios = json.loads(respuesta_json)
-                    res_sheets = requests.post(sheets_url, json=datos_limpios)
-                    print(f"Respuesta Sheets: {res_sheets.text}")
+                    requests.post(sheets_url, json=datos_limpios)
                 except Exception as sheet_err:
                     print(f"Error al guardar en Sheets: {sheet_err}")
                     
-            # 3. Responder confirmación al usuario en Telegram
+            # RESPONDER CONFIRMACIÓN EN TELEGRAM
             enviar_mensaje_telegram(chat_id, f"✅ Gasto procesado:\n{respuesta_json}")
             
     except Exception as e:
