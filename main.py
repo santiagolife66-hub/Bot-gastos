@@ -8,18 +8,16 @@ import json
 
 app = Flask(__name__)
 
-# --- 1. CONFIGURACIÓN DE CLAVES Y CLIENTE API ---
-# Inicializamos el nuevo cliente. Detecta automáticamente la variable GEMINI_API_KEY del entorno.
+# --- 1. CONFIGURACIÓN DE CLIENTES Y TOKENS ---
+# Inicializa el cliente de Gemini (detecta automáticamente GEMINI_API_KEY)
 client = genai.Client()
 
-# Estas variables se configuran en el entorno de Render
-WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
-PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
-WEBHOOK_VERIFY_TOKEN = os.environ.get("WEBHOOK_VERIFY_TOKEN", "mi_token_secreto")
+# Token de Telegram configurado en Render
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 # --- 2. INSTRUCCIONES PARA GEMINI ---
 INSTRUCCIONES_SISTEMA = """
-Eres un asistente experto en finanzas personales y gestión de gastos del hogar, diseñado específicamente para Santiago y Yoly. Tu objetivo es procesar mensajes de texto de comprobantes que ellos te envíen por WhatsApp, extraer la información financiera relevante y estructurarla estrictamente en formato JSON.
+Eres un asistente experto en finanzas personales y gestión de gastos del hogar, diseñado específicamente para Santiago y Yoly. Tu objetivo es procesar mensajes de texto de comprobantes que ellos te envíen por WhatsApp o Telegram, extraer la información financiera relevante y estructurarla estrictamente en formato JSON.
 
 CRITERIOS DE PROCESAMIENTO:
 1. Analiza el gasto descrito en el texto.
@@ -47,7 +45,6 @@ def procesar_texto_gemini(mensaje_texto: str) -> str:
     contenido = f"{contexto_temporal}\nMensaje del usuario: {mensaje_texto}"
     
     try:
-        # Migrado a la nueva sintaxis de google-genai y actualizado a gemini-2.5-flash
         respuesta = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=contenido,
@@ -60,87 +57,61 @@ def procesar_texto_gemini(mensaje_texto: str) -> str:
     except Exception as e:
         return f'{{"error": "Fallo en Gemini: {str(e)}"}}'
 
-def enviar_mensaje_whatsapp(numero_destino: str, texto_respuesta: str):
-    """Envía la respuesta de vuelta al usuario por WhatsApp"""
-    url = f"https://graph.facebook.com/v17.0/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
+def enviar_mensaje_telegram(chat_id: int, texto_respuesta: str):
+    """Envía la respuesta de vuelta al chat de Telegram"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {
-        "messaging_product": "whatsapp",
-        "to": numero_destino,
-        "type": "text",
-        "text": {"body": texto_respuesta}
+        "chat_id": chat_id,
+        "text": texto_respuesta
     }
-    respuesta = requests.post(url, headers=headers, json=data)
-    print(f"Respuesta de Meta: {respuesta.json()}") 
+    try:
+        respuesta = requests.post(url, json=data)
+        print(f"Respuesta de Telegram: {respuesta.json()}")
+    except Exception as e:
+        print(f"Error al enviar mensaje a Telegram: {e}")
 
 
 # --- 3. RUTAS DEL SERVIDOR WEB ---
 @app.route('/', methods=['GET'])
 def home():
-    return "¡El bot está activo y conectado a WhatsApp!"
+    return "¡El Bot de Gastos de Telegram está activo!"
 
-@app.route('/webhook', methods=['GET', 'POST'])
+@app.route('/webhook', methods=['POST'])
 def webhook():
-    # Verificación inicial de Meta (Modo Webhook Setup)
-    if request.method == 'GET':
-        mode = request.args.get("hub.mode")
-        token = request.args.get("hub.verify_token")
-        challenge = request.args.get("hub.challenge")
-        # Ahora compara con la variable de entorno para que sea seguro
-        if mode == "subscribe" and token == WEBHOOK_VERIFY_TOKEN:
-            return challenge, 200
-        return "Token inválido", 403
-                
-    # Recepción de mensajes en tiempo real de WhatsApp
-    if request.method == 'POST':
-        data = request.json
-        try:
-            if 'object' in data and data['object'] == 'whatsapp_business_account':
-                entry = data['entry'][0]
-                changes = entry['changes'][0]
-                value = changes['value']
-                
-                if 'messages' in value:
-                    mensaje = value['messages'][0]
-                    numero_remitente = mensaje['from']
-                    texto_recibido = None
-                    
-                    # Detecta el texto tanto de usuarios reales como de plantillas de prueba
-                    if 'text' in mensaje:
-                        texto_recibido = mensaje['text']['body']
-                    elif 'button' in mensaje:
-                        texto_recibido = mensaje['button']['text']
-                    elif mensaje['type'] == 'text':
-                        texto_recibido = mensaje['text']['body']
-                        
-                    # Si logramos extraer texto del mensaje entrante
-                    if texto_recibido:
-                        respuesta_json = procesar_texto_gemini(texto_recibido)
-                        
-                        # Enviar datos a Google Sheets usando la URL configurada en Render
-                        sheets_url = os.environ.get("SHEETS_URL")
-                        if sheets_url:
-                            try:
-                                datos_limpios = json.loads(respuesta_json)
-                                requests.post(sheets_url, json=datos_limpios)
-                                print("Datos enviados exitosamente a Google Sheets.")
-                            except Exception as sheet_err:
-                                print(f"Error al guardar en Sheets: {sheet_err}")
-                                
-                        # Responder confirmación por WhatsApp
-                        enviar_mensaje_whatsapp(numero_remitente, respuesta_json)
-                        
-                    # Si el mensaje es una imagen
-                    elif mensaje['type'] == 'image':
-                        enviar_mensaje_whatsapp(numero_remitente, "Recibí la foto. La función de imágenes requiere configurar permisos adicionales de descarga. ¡Por ahora probemos enviando el gasto en texto!")
-                        
-        except Exception as e:
-            print(f"Error procesando mensaje: {e}")
+    """Ruta que recibe las alertas de nuevos mensajes desde Telegram"""
+    data = request.json
+    
+    try:
+        # Estructura nativa de un mensaje de texto en Telegram
+        if 'message' in data and 'text' in data['message']:
+            chat_id = data['message']['chat']['id']
+            texto_recibido = data['message']['text']
             
-        return jsonify({"status": "success"}), 200
+            # Evitamos procesar comandos de inicio del bot
+            if texto_recibido.startswith('/'):
+                enviar_mensaje_telegram(chat_id, "¡Hola! Envíame cualquier gasto (Ej: 'Menú 15 soles yape') y lo registraré automáticamente.")
+                return jsonify({"status": "success"}), 200
+                
+            # 1. Pasar el texto por Gemini para que lo estructure
+            respuesta_json = procesar_texto_gemini(texto_recibido)
+            
+            # 2. Enviar los datos limpios a Google Sheets
+            sheets_url = os.environ.get("SHEETS_URL")
+            if sheets_url:
+                try:
+                    datos_limpios = json.loads(respuesta_json)
+                    res_sheets = requests.post(sheets_url, json=datos_limpios)
+                    print(f"Respuesta Sheets: {res_sheets.text}")
+                except Exception as sheet_err:
+                    print(f"Error al guardar en Sheets: {sheet_err}")
+                    
+            # 3. Responder confirmación al usuario en Telegram
+            enviar_mensaje_telegram(chat_id, f"✅ Gasto procesado:\n{respuesta_json}")
+            
+    except Exception as e:
+        print(f"Error general en webhook: {e}")
+        
+    return jsonify({"status": "success"}), 200
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000)
