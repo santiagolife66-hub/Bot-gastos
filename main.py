@@ -12,7 +12,7 @@ API_KEY = os.environ.get("GEMINI_API_KEY")
 if API_KEY:
     genai.configure(api_key=API_KEY)
 
-# Estas dos variables las sacaremos de Meta en el siguiente paso
+# Estas variables se configuran en el entorno de Render
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
 
@@ -70,7 +70,6 @@ def enviar_mensaje_whatsapp(numero_destino: str, texto_respuesta: str):
         "text": {"body": texto_respuesta}
     }
     respuesta = requests.post(url, headers=headers, json=data)
-    # Esto imprimirá la respuesta exacta de Meta en los logs de Render
     print(f"Respuesta de Meta: {respuesta.json()}") 
 
 
@@ -99,32 +98,39 @@ def webhook():
                 changes = entry['changes'][0]
                 value = changes['value']
                 
-                # Verificar si el webhook trae un mensaje
                 if 'messages' in value:
                     mensaje = value['messages'][0]
                     numero_remitente = mensaje['from']
+                    texto_recibido = None
                     
-                    # Si el usuario envía texto
-                    if mensaje['type'] == 'text':
+                    # [MEJORA]: Detecta el texto tanto de usuarios reales como de plantillas de prueba
+                    if 'text' in mensaje:
                         texto_recibido = mensaje['text']['body']
+                    elif 'button' in mensaje:
+                        texto_recibido = mensaje['button']['text']
+                    elif mensaje['type'] == 'text':
+                        texto_recibido = mensaje['text']['body']
+                        
+                    # Si logramos extraer texto del mensaje entrante
+                    if texto_recibido:
                         respuesta_json = procesar_texto_gemini(texto_recibido)
                         
-                        # [NUEVO]: Enviar datos a Google Sheets si la URL está configurada en Render
+                        # Enviar datos a Google Sheets usando la URL configurada en Render
                         sheets_url = os.environ.get("SHEETS_URL")
                         if sheets_url:
                             try:
                                 datos_limpios = json.loads(respuesta_json)
-                                # Enviamos el JSON estructurado al webhook de tu Google Sheets
                                 requests.post(sheets_url, json=datos_limpios)
+                                print("Datos enviados exitosamente a Google Sheets.")
                             except Exception as sheet_err:
                                 print(f"Error al guardar en Sheets: {sheet_err}")
                                 
-                        # Enviar confirmación con el JSON estructurado de vuelta por WhatsApp
+                        # Responder confirmación por WhatsApp
                         enviar_mensaje_whatsapp(numero_remitente, respuesta_json)
                         
-                    # Si envías una imagen (Estructura lista para cuando escales el bot)
+                    # Si el mensaje es una imagen
                     elif mensaje['type'] == 'image':
-                        enviar_mensaje_whatsapp(numero_remitente, "Recibí la foto. La función de imágenes requiere unos permisos más. ¡Por ahora probemos enviando el gasto en texto!")
+                        enviar_mensaje_whatsapp(numero_remitente, "Recibí la foto. La función de imágenes requiere configurar permisos adicionales de descarga. ¡Por ahora probemos enviando el gasto en texto!")
                         
         except Exception as e:
             print(f"Error procesando mensaje: {e}")
