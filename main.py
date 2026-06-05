@@ -1,20 +1,21 @@
 import os
 import requests
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from flask import Flask, request, jsonify
 from datetime import datetime
 import json
 
 app = Flask(__name__)
 
-# --- 1. CONFIGURACIÓN DE CLAVES API ---
-API_KEY = os.environ.get("GEMINI_API_KEY")
-if API_KEY:
-    genai.configure(api_key=API_KEY)
+# --- 1. CONFIGURACIÓN DE CLAVES Y CLIENTE API ---
+# Inicializamos el nuevo cliente. Detecta automáticamente la variable GEMINI_API_KEY del entorno.
+client = genai.Client()
 
 # Estas variables se configuran en el entorno de Render
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
+WEBHOOK_VERIFY_TOKEN = os.environ.get("WEBHOOK_VERIFY_TOKEN", "mi_token_secreto")
 
 # --- 2. INSTRUCCIONES PARA GEMINI ---
 INSTRUCCIONES_SISTEMA = """
@@ -41,17 +42,20 @@ Estructura del JSON:
 """
 
 def procesar_texto_gemini(mensaje_texto: str) -> str:
-    modelo = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction=INSTRUCCIONES_SISTEMA,
-        generation_config=genai.GenerationConfig(response_mime_type="application/json")
-    )
     ahora = datetime.now()
     contexto_temporal = f"Contexto de envío - Fecha: {ahora.strftime('%d/%m/%Y')} | Hora: {ahora.strftime('%H:%M')}."
-    contenido = [f"{contexto_temporal}\nMensaje del usuario: {mensaje_texto}"]
+    contenido = f"{contexto_temporal}\nMensaje del usuario: {mensaje_texto}"
     
     try:
-        respuesta = modelo.generate_content(contenido)
+        # Migrado a la nueva sintaxis de google-genai y actualizado a gemini-2.5-flash
+        respuesta = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=contenido,
+            config=types.GenerateContentConfig(
+                system_instruction=INSTRUCCIONES_SISTEMA,
+                response_mime_type="application/json"
+            )
+        )
         return respuesta.text
     except Exception as e:
         return f'{{"error": "Fallo en Gemini: {str(e)}"}}'
@@ -85,7 +89,8 @@ def webhook():
         mode = request.args.get("hub.mode")
         token = request.args.get("hub.verify_token")
         challenge = request.args.get("hub.challenge")
-        if mode == "subscribe" and token == "mi_token_secreto":
+        # Ahora compara con la variable de entorno para que sea seguro
+        if mode == "subscribe" and token == WEBHOOK_VERIFY_TOKEN:
             return challenge, 200
         return "Token inválido", 403
                 
@@ -103,7 +108,7 @@ def webhook():
                     numero_remitente = mensaje['from']
                     texto_recibido = None
                     
-                    # [MEJORA]: Detecta el texto tanto de usuarios reales como de plantillas de prueba
+                    # Detecta el texto tanto de usuarios reales como de plantillas de prueba
                     if 'text' in mensaje:
                         texto_recibido = mensaje['text']['body']
                     elif 'button' in mensaje:
