@@ -3,6 +3,7 @@ import requests
 import google.generativeai as genai
 from flask import Flask, request, jsonify
 from datetime import datetime
+import json
 
 app = Flask(__name__)
 
@@ -79,30 +80,8 @@ def home():
     return "¡El bot está activo y conectado a WhatsApp!"
 
 @app.route('/webhook', methods=['GET', 'POST'])
-# ... (dentro de @app.route('/webhook', methods=['GET', 'POST']))
-
-# Si envías texto
-if mensaje['type'] == 'text':
-    texto_recibido = mensaje['text']['body']
-    respuesta_json = procesar_texto_gemini(texto_recibido)
-    
-    # [NUEVO]: Enviar datos a Google Sheets si la URL está configurada
-    sheets_url = os.environ.get("SHEETS_URL")
-    if sheets_url:
-        try:
-            import json
-            datos_limpios = json.loads(respuesta_json)
-            # Enviamos el JSON directamente a tu Google Sheets
-            requests.post(sheets_url, json=datos_limpios)
-        except Exception as sheet_err:
-            print(f"Error al guardar en Sheets: {sheet_err}")
-            
-    # Enviar confirmación por WhatsApp
-    enviar_mensaje_whatsapp(numero_remitente, respuesta_json)
-
-
 def webhook():
-    # Verificación inicial de Meta
+    # Verificación inicial de Meta (Modo Webhook Setup)
     if request.method == 'GET':
         mode = request.args.get("hub.mode")
         token = request.args.get("hub.verify_token")
@@ -111,7 +90,7 @@ def webhook():
             return challenge, 200
         return "Token inválido", 403
                 
-    # Recepción de mensajes de WhatsApp
+    # Recepción de mensajes en tiempo real de WhatsApp
     if request.method == 'POST':
         data = request.json
         try:
@@ -120,18 +99,30 @@ def webhook():
                 changes = entry['changes'][0]
                 value = changes['value']
                 
-                # Verificar si es un mensaje (y no un check azul de lectura)
+                # Verificar si el webhook trae un mensaje
                 if 'messages' in value:
                     mensaje = value['messages'][0]
                     numero_remitente = mensaje['from']
                     
-                    # Si envías texto
+                    # Si el usuario envía texto
                     if mensaje['type'] == 'text':
                         texto_recibido = mensaje['text']['body']
                         respuesta_json = procesar_texto_gemini(texto_recibido)
+                        
+                        # [NUEVO]: Enviar datos a Google Sheets si la URL está configurada en Render
+                        sheets_url = os.environ.get("SHEETS_URL")
+                        if sheets_url:
+                            try:
+                                datos_limpios = json.loads(respuesta_json)
+                                # Enviamos el JSON estructurado al webhook de tu Google Sheets
+                                requests.post(sheets_url, json=datos_limpios)
+                            except Exception as sheet_err:
+                                print(f"Error al guardar en Sheets: {sheet_err}")
+                                
+                        # Enviar confirmación con el JSON estructurado de vuelta por WhatsApp
                         enviar_mensaje_whatsapp(numero_remitente, respuesta_json)
                         
-                    # Si envías una imagen (Dejamos esto preparado para el futuro)
+                    # Si envías una imagen (Estructura lista para cuando escales el bot)
                     elif mensaje['type'] == 'image':
                         enviar_mensaje_whatsapp(numero_remitente, "Recibí la foto. La función de imágenes requiere unos permisos más. ¡Por ahora probemos enviando el gasto en texto!")
                         
